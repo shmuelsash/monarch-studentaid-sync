@@ -1,0 +1,61 @@
+name: Daily sync (TrueNAS)
+
+# Replaces the Nelnet + EdFinancial blocks in monarch-sync-daily.sh.
+#
+# This repo (shmuelsash's fork of mattebad/monarch-studentaid-sync) is deployed
+# TWICE on TrueNAS — once per person — each in its own dir with its own .env:
+#   nelnet-sync-shmuel      (Nelnet / Shmuel)
+#   edfinancial-sync-shana  (EdFinancial / Shana)
+#
+# One workflow drives both via a matrix, on this repo's dedicated self-hosted
+# runner. The deployed dirs track UPSTREAM mattebad/main (public — no credential
+# needed for the code pull). Secrets stay in each dir's .env on the box and are
+# never sent to GitHub.
+on:
+  schedule:
+    # 14:00 UTC, staggered after grocery (13:30) and optum (13:45) so the syncs
+    # don't overlap on the box. GitHub cron is UTC-only and may lag a few minutes.
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: studentaid-daily-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: self-hosted
+    name: ${{ matrix.person.name }}
+    strategy:
+      max-parallel: 1   # single runner; also avoids two Monarch logins at once
+      fail-fast: false  # one person's failure must not cancel the other
+      matrix:
+        person:
+          - { name: "Nelnet (Shmuel)", dir: nelnet-sync-shmuel }
+          - { name: "EdFinancial (Shana)", dir: edfinancial-sync-shana }
+    permissions:
+      contents: read
+    env:
+      DIR: /mnt/main_server/homelab-apps/monarch-sync/monarch-studentaid-sync/${{ matrix.person.dir }}
+    steps:
+      - name: Update deployed code (tracks upstream mattebad/main, public)
+        run: |
+          git config --global --add safe.directory "$DIR"
+          cd "$DIR"
+          git fetch origin
+          git reset --hard origin/main
+
+      - name: Verify secrets are present on the box
+        run: |
+          cd "$DIR"
+          test -f .env || { echo "::error::.env missing in $DIR — secrets must stay on TrueNAS"; exit 1; }
+
+      - name: Build image on the box
+        run: |
+          cd "$DIR"
+          sudo docker compose build
+
+      - name: Run sync
+        run: |
+          cd "$DIR"
+          sudo docker compose run --rm studentaid-monarch-sync
