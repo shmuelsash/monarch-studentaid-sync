@@ -31,19 +31,22 @@ jobs:
       fail-fast: false  # one person's failure must not cancel the other
       matrix:
         person:
-          - { name: "Nelnet (Shmuel)", dir: nelnet-sync-shmuel }
-          - { name: "EdFinancial (Shana)", dir: edfinancial-sync-shana }
+          - { name: "Nelnet (Shmuel)", dir: nelnet-sync-shmuel, ref: "origin/main" }
+          # TEMP PIN: run the modal-fix branch until mattebad/monarch-studentaid-sync#18
+          # merges upstream, then change this back to "origin/main".
+          - { name: "EdFinancial (Shana)", dir: edfinancial-sync-shana, ref: "fork/fix/edfinancial-cookieyes-modals" }
     permissions:
       contents: read
     env:
       DIR: /mnt/main_server/homelab-apps/monarch-sync/monarch-studentaid-sync/${{ matrix.person.dir }}
+      REF: ${{ matrix.person.ref }}
     steps:
-      - name: Update deployed code (tracks upstream mattebad/main, public)
+      - name: Update deployed code (Nelnet -> upstream mattebad/main; EdFinancial -> pinned fix branch)
         run: |
           git config --global --add safe.directory "$DIR"
           cd "$DIR"
-          git fetch origin
-          git reset --hard origin/main
+          git fetch --all --prune
+          git reset --hard "$REF"
 
       - name: Verify secrets are present on the box
         run: |
