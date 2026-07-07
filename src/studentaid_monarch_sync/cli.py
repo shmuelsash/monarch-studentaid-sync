@@ -266,6 +266,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if env_path.exists():
         load_dotenv(env_path)
 
+    # Decrypt at-rest secrets (servicer/Gmail/Monarch) into the environment BEFORE
+    # config reads them. Best-effort + self-seeding: during the migration window the
+    # values may still come from .env; once stored they win and .env can be removed.
+    # See secret_store.py + SECURITY-BASELINE.md section 6.
+    from . import secret_store
+
+    secret_store.load_into_env()
+
     # Default logging: can be overridden once config is loaded.
     configure_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 

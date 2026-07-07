@@ -7,6 +7,12 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+      # Per-deploy encrypted secret safe (Fernet key + blob), managed by the
+      # homelab dashboard. SECRET_STORE_HOST points each deploy at its OWN folder
+      # (e.g. ../../secrets/edfinancial vs ../../secrets/nelnet) so one servicer's
+      # job can't read the other's secrets. The app decrypts it into its env at
+      # startup (secret_store.py). See SECURITY-BASELINE.md section 6.
+      - ${SECRET_STORE_HOST:-./secrets}:/secrets
     # Recommended for Chromium/Playwright stability (avoids /dev/shm issues).
     shm_size: "1gb"
     command: ["sync"]
