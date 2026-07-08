@@ -11,12 +11,31 @@ name: Daily sync (TrueNAS)
 # runner. The deployed dirs track UPSTREAM mattebad/main (public — no credential
 # needed for the code pull). Secrets stay in each dir's .env on the box and are
 # never sent to GitHub.
+# ── CHANGING WHICH BRANCH A JOB RUNS ────────────────────────────────────────────
+# The deployed code is picked per person by `ref` in the matrix below:
+#   origin/main         -> mattebad's upstream (the normal state)
+#   fork/<branch-name>  -> a branch on YOUR fork (shmuelsash)
+# Two ways to switch (e.g. to run your own PR branch until it merges upstream):
+#   1. PERSISTENT (every daily run): edit the person's `ref:` in the matrix and
+#      commit; change it back to "origin/main" once your PR merges upstream.
+#   2. ONE-OFF (a single manual run): Actions -> Daily sync -> "Run workflow",
+#      type a ref in that person's box. Blank = use the matrix default.
+# ────────────────────────────────────────────────────────────────────────────────
 on:
   schedule:
     # 14:00 UTC, staggered after grocery (13:30) and optum (13:45) so the syncs
     # don't overlap on the box. GitHub cron is UTC-only and may lag a few minutes.
     - cron: "0 14 * * *"
   workflow_dispatch:
+    inputs:
+      nelnet_ref:
+        description: "Nelnet: git ref for THIS run only (blank = matrix default). e.g. fork/my-branch"
+        required: false
+        default: ""
+      edfinancial_ref:
+        description: "EdFinancial: git ref for THIS run only (blank = matrix default). e.g. fork/my-branch"
+        required: false
+        default: ""
 
 concurrency:
   group: studentaid-daily-sync
@@ -45,11 +64,15 @@ jobs:
     env:
       MS: /mnt/main_server/homelab-apps/monarch-sync
       DIR: /mnt/main_server/homelab-apps/monarch-sync/monarch-studentaid-sync/${{ matrix.person.dir }}
-      REF: ${{ matrix.person.ref }}
+      DEFAULT_REF: ${{ matrix.person.ref }}
+      # One-off override typed in the "Run workflow" dialog (empty on scheduled runs).
+      OVERRIDE_REF: ${{ (matrix.person.safe == 'nelnet' && inputs.nelnet_ref) || (matrix.person.safe == 'edfinancial' && inputs.edfinancial_ref) || '' }}
       SAFE: ${{ matrix.person.safe }}
     steps:
-      - name: Update deployed code (Nelnet -> upstream mattebad/main; EdFinancial -> pinned fix branch)
+      - name: Update deployed code (default = matrix ref; a manual-run override wins)
         run: |
+          REF="${OVERRIDE_REF:-$DEFAULT_REF}"
+          echo "Deploying $SAFE at ref: $REF"
           git config --global --add safe.directory "$DIR"
           cd "$DIR"
           git fetch --all --prune
