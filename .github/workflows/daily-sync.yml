@@ -15,11 +15,12 @@ name: Daily sync (TrueNAS)
 # The deployed code is picked per person by `ref` in the matrix below:
 #   origin/main         -> mattebad's upstream (the normal state)
 #   fork/<branch-name>  -> a branch on YOUR fork (shmuelsash)
-# Two ways to switch (e.g. to run your own PR branch until it merges upstream):
-#   1. PERSISTENT (every daily run): edit the person's `ref:` in the matrix and
-#      commit; change it back to "origin/main" once your PR merges upstream.
-#   2. ONE-OFF (a single manual run): Actions -> Daily sync -> "Run workflow",
-#      type a ref in that person's box. Blank = use the matrix default.
+# The deploy picks the ref in this order:
+#   1. A ref typed in "Run workflow" (this run only) -> overrides everything.
+#   2. The branch chosen in the DASHBOARD (Sync page dropdown), saved to
+#      monarch-sync/secrets/<job>/ref -> the easy, no-YAML way to run your PR
+#      branch until it merges upstream. This is the normal way to switch.
+#   3. The matrix `ref:` default below -> the fallback if 1 and 2 are unset.
 # ────────────────────────────────────────────────────────────────────────────────
 on:
   schedule:
@@ -69,9 +70,16 @@ jobs:
       OVERRIDE_REF: ${{ (matrix.person.safe == 'nelnet' && inputs.nelnet_ref) || (matrix.person.safe == 'edfinancial' && inputs.edfinancial_ref) || '' }}
       SAFE: ${{ matrix.person.safe }}
     steps:
-      - name: Update deployed code (default = matrix ref; a manual-run override wins)
+      - name: Update deployed code (order = manual override, then dashboard pick, then matrix default)
         run: |
-          REF="${OVERRIDE_REF:-$DEFAULT_REF}"
+          # 1) a ref typed in the "Run workflow" box (this run only)
+          REF="$OVERRIDE_REF"
+          # 2) else the branch chosen in the dashboard (Sync page), saved to <job>/ref
+          if [ -z "$REF" ] && [ -f "$MS/secrets/$SAFE/ref" ]; then
+            REF="$(cat "$MS/secrets/$SAFE/ref")"
+          fi
+          # 3) else the matrix default below
+          REF="${REF:-$DEFAULT_REF}"
           echo "Deploying $SAFE at ref: $REF"
           git config --global --add safe.directory "$DIR"
           cd "$DIR"
