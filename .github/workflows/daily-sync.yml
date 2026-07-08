@@ -31,15 +31,22 @@ jobs:
       fail-fast: false  # one person's failure must not cancel the other
       matrix:
         person:
-          - { name: "Nelnet (Shmuel)", dir: nelnet-sync-shmuel, ref: "origin/main" }
+          - { name: "Nelnet (Shmuel)", dir: nelnet-sync-shmuel, ref: "origin/main", safe: nelnet }
           # TEMP PIN: run the modal-fix branch until mattebad/monarch-studentaid-sync#18
           # merges upstream, then change this back to "origin/main".
-          - { name: "EdFinancial (Shana)", dir: edfinancial-sync-shana, ref: "fork/fix/edfinancial-cookieyes-modals" }
+          - {
+              name: "EdFinancial (Shana)",
+              dir: edfinancial-sync-shana,
+              ref: "fork/fix/edfinancial-cookieyes-modals",
+              safe: edfinancial,
+            }
     permissions:
       contents: read
     env:
+      MS: /mnt/main_server/homelab-apps/monarch-sync
       DIR: /mnt/main_server/homelab-apps/monarch-sync/monarch-studentaid-sync/${{ matrix.person.dir }}
       REF: ${{ matrix.person.ref }}
+      SAFE: ${{ matrix.person.safe }}
     steps:
       - name: Update deployed code (Nelnet -> upstream mattebad/main; EdFinancial -> pinned fix branch)
         run: |
@@ -48,17 +55,22 @@ jobs:
           git fetch --all --prune
           git reset --hard "$REF"
 
-      - name: Verify secrets are present on the box
+      - name: Verify config + encrypted secret safe are present on the box
         run: |
           cd "$DIR"
-          test -f .env || { echo "::error::.env missing in $DIR — secrets must stay on TrueNAS"; exit 1; }
+          test -f .env || { echo "::error::.env missing in $DIR (non-secret config)"; exit 1; }
+          test -f "$MS/secrets/$SAFE/secrets.enc" \
+            || { echo "::error::secret safe missing for '$SAFE' -- set it in the dashboard (Sync -> Credentials)"; exit 1; }
 
       - name: Build image on the box
         run: |
           cd "$DIR"
           sudo docker compose build
 
-      - name: Run sync
+      - name: Run sync (secrets decrypted from the safe into the container -- never on disk)
+        # The upstream app reads its secrets from the environment as usual; this wrapper
+        # decrypts the per-job safe and forwards the values via `docker compose run -e`,
+        # so no secrets logic has to live in the (upstream-tracked) app code.
         run: |
           cd "$DIR"
-          sudo docker compose run --rm studentaid-monarch-sync
+          sudo python3 "$MS/run-with-secrets.py" "$SAFE" -- docker compose run --rm studentaid-monarch-sync
