@@ -105,3 +105,12 @@ jobs:
         run: |
           cd "$DIR"
           sudo python3 "$MS/run-with-secrets.py" "$SAFE" -- docker compose run --rm studentaid-monarch-sync
+
+      # `compose run --rm` only removes the container; the project's bridge
+      # network is left behind on every run. Tear it down here (always, even
+      # on failure) so it doesn't pile up alongside the other sync jobs' networks.
+      - name: Remove the compose network
+        if: always()
+        run: |
+          cd "$DIR"
+          sudo docker compose down --remove-orphans
