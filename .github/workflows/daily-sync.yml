@@ -102,9 +102,25 @@ jobs:
         # The upstream app reads its secrets from the environment as usual; this wrapper
         # decrypts the per-job safe and forwards the values via `docker compose run -e`,
         # so no secrets logic has to live in the (upstream-tracked) app code.
+        #
+        # Retried here (deploy layer) rather than in-app: the portal login occasionally
+        # flakes on a transient page-render hiccup (e.g. a "Sign in" button not ready
+        # yet) that a plain rerun clears right up. Adding retry logic to src/ would mean
+        # diverging from upstream -- see DEPLOY.md.
         run: |
           cd "$DIR"
-          sudo python3 "$MS/run-with-secrets.py" "$SAFE" -- docker compose run --rm studentaid-monarch-sync
+          attempts=2
+          for i in $(seq 1 "$attempts"); do
+            if sudo python3 "$MS/run-with-secrets.py" "$SAFE" -- docker compose run --rm studentaid-monarch-sync; then
+              exit 0
+            fi
+            if [ "$i" -lt "$attempts" ]; then
+              echo "::warning::Sync attempt $i/$attempts failed (possible transient portal flake); retrying in 60s..."
+              sleep 60
+            fi
+          done
+          echo "::error::Sync failed after $attempts attempts."
+          exit 1
 
       # `compose run --rm` only removes the container; the project's bridge
       # network is left behind on every run. Tear it down here (always, even

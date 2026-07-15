@@ -34,6 +34,20 @@ it in production while the PR is in review, and switch the `ref:` back to
 `origin/main` the moment it merges. Never hand-edit `src/` on this fork's
 `main` — that's exactly the drift this setup is built to avoid.
 
+## Transient portal flakes: retried at the deploy layer, not in `src/`
+
+The "Run sync" step retries the whole `docker compose run` once (60s apart)
+before failing the job. This exists because the portal login occasionally
+hits a one-off render hiccup — e.g. 2026-07-15's Nelnet run failed with
+`Could not find clickable element for any of: ('Sign in', ...)`, and a plain
+manual rerun of the exact same code succeeded immediately. That's a signature
+of a transient flake, not a broken selector — worth a workflow-level retry,
+not worth patching `src/` (see above: never diverge from upstream).
+
+If the *same* failure repeats across multiple days, that's no longer a flake
+retry can paper over — it means the portal actually changed and needs a real
+selector fix upstream (PR to mattebad, same process as the EdFinancial pin).
+
 ## Adding a new sync job (new matrix entry, or a new person)
 
 If you're adding another `person:` entry to the matrix, or copying
