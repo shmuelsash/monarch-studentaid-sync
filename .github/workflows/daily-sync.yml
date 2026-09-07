@@ -27,6 +27,12 @@ on:
     # 14:00 UTC, staggered after grocery (13:30) and optum (13:45) so the syncs
     # don't overlap on the box. GitHub cron is UTC-only and may lag a few minutes.
     - cron: "0 14 * * *"
+    # Second pass ~8h later. On 2026-09-07 both servicers were refused at the
+    # TCP layer (net::ERR_CONNECTION_REFUSED to nelnet/edfinancial.studentaid.gov,
+    # adjacent IPs in one Akamai /24) and the whole day was lost. The in-job
+    # retry below is 60s apart -- far too short to outlast an egress block. This
+    # run stands down when the day already succeeded, so a good day costs nothing.
+    - cron: "0 22 * * *"
   workflow_dispatch:
     inputs:
       nelnet_ref:
@@ -70,7 +76,28 @@ jobs:
       OVERRIDE_REF: ${{ (matrix.person.safe == 'nelnet' && inputs.nelnet_ref) || (matrix.person.safe == 'edfinancial' && inputs.edfinancial_ref) || '' }}
       SAFE: ${{ matrix.person.safe }}
     steps:
+      # Repeating a day's work is not free: another servicer login, another
+      # chance to trip a portal's bot detection. The evening pass exists only to
+      # rescue a failed morning, and each person is tracked separately since the
+      # matrix can fail one and not the other. Manual runs always proceed.
+      - name: Skip if already synced today
+        id: guard
+        run: |
+          state="$MS/.last-sync-success-$SAFE"
+          skip=false
+          if [ "${{ github.event_name }}" = "schedule" ] && [ -f "$state" ]; then
+            last=$(cat "$state" 2>/dev/null || echo 0)
+            case "$last" in ''|*[!0-9]*) last=0 ;; esac
+            age=$(( $(date -u +%s) - last ))
+            if [ "$last" -gt 0 ] && [ "$age" -lt 72000 ]; then
+              echo "$SAFE: last success $(( age / 3600 ))h ago (under 20h) — standing down."
+              skip=true
+            fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+
       - name: Update deployed code (order = manual override, then dashboard pick, then matrix default)
+        if: steps.guard.outputs.skip != 'true'
         run: |
           # 1) a ref typed in the "Run workflow" box (this run only)
           REF="$OVERRIDE_REF"
@@ -87,6 +114,7 @@ jobs:
           git reset --hard "$REF"
 
       - name: Verify config + encrypted secret safe are present on the box
+        if: steps.guard.outputs.skip != 'true'
         run: |
           cd "$DIR"
           test -f .env || { echo "::error::.env missing in $DIR (non-secret config)"; exit 1; }
@@ -94,11 +122,13 @@ jobs:
             || { echo "::error::secret safe missing for '$SAFE' -- set it in the dashboard (Sync -> Credentials)"; exit 1; }
 
       - name: Build image on the box
+        if: steps.guard.outputs.skip != 'true'
         run: |
           cd "$DIR"
           sudo docker compose build
 
       - name: Run sync (secrets decrypted from the safe into the container -- never on disk)
+        if: steps.guard.outputs.skip != 'true'
         # The upstream app reads its secrets from the environment as usual; this wrapper
         # decrypts the per-job safe and forwards the values via `docker compose run -e`,
         # so no secrets logic has to live in the (upstream-tracked) app code.
@@ -122,11 +152,44 @@ jobs:
           echo "::error::Sync failed after $attempts attempts."
           exit 1
 
+      - name: Record success
+        if: success() && steps.guard.outputs.skip != 'true'
+        run: date -u +%s > "$MS/.last-sync-success-$SAFE"
+
+      # A network failure logs only "connection refused" -- not which address,
+      # and not whether something on our own network refused it. That gap turned
+      # 2026-09-07 into a manual firewall hunt. Probe this person's servicer (read
+      # from the deployed .env, so it follows SERVICER_BASE_URL rather than a
+      # hardcoded guess) plus the shared dependencies, at failure time, so the
+      # next one names the IP itself. Only the hostname is ever printed.
+      - name: Network diagnostics (on failure)
+        if: failure()
+        run: |
+          cd "$DIR"
+          url=$(grep -E '^SERVICER_BASE_URL=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d "\"' " || true)
+          servicer=$(printf '%s' "$url" | sed -E 's#^[a-zA-Z]+://##; s#[/:].*##')
+          echo "Probed from $(hostname) at $(date -u +%FT%TZ) for '$SAFE'"
+          for host in $servicer app.monarchmoney.com imap.gmail.com mcr.microsoft.com; do
+            echo "-- $host"
+            ips=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u)
+            if [ -z "$ips" ]; then
+              echo "   DNS: no A record — resolution itself failed"
+              continue
+            fi
+            for ip in $ips; do
+              if timeout 5 bash -c "exec 3<>/dev/tcp/$ip/443" 2>/dev/null; then
+                echo "   $ip:443  reachable"
+              else
+                echo "   $ip:443  REFUSED or unreachable"
+              fi
+            done
+          done
+
       # `compose run --rm` only removes the container; the project's bridge
       # network is left behind on every run. Tear it down here (always, even
       # on failure) so it doesn't pile up alongside the other sync jobs' networks.
       - name: Remove the compose network
-        if: always()
+        if: always() && steps.guard.outputs.skip != 'true'
         run: |
           cd "$DIR"
           sudo docker compose down --remove-orphans
