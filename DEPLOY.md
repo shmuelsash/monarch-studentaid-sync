@@ -36,17 +36,44 @@ it in production while the PR is in review, and switch the `ref:` back to
 
 ## Transient portal flakes: retried at the deploy layer, not in `src/`
 
-The "Run sync" step retries the whole `docker compose run` once (60s apart)
-before failing the job. This exists because the portal login occasionally
+The "Run sync" step retries the whole `docker compose run` up to 3 times,
+waiting 60s and then 300s. This exists because the portal login occasionally
 hits a one-off render hiccup — e.g. 2026-07-15's Nelnet run failed with
 `Could not find clickable element for any of: ('Sign in', ...)`, and a plain
 manual rerun of the exact same code succeeded immediately. That's a signature
 of a transient flake, not a broken selector — worth a workflow-level retry,
 not worth patching `src/` (see above: never diverge from upstream).
 
+**A rejected login is not retried at all.** If the output names one — Monarch's
+`Invalid email and password combination`, the portal's `rejected your User ID /
+Password`, or any "account may be locked" wording — the step stops right there.
+Those fail identically every time, and each extra attempt is one closer to the
+lockout the app itself warns about. 2026-09-15's evening Nelnet pass spent both
+its attempts, and a 60s wait, on a password Monarch had already refused. When
+you see that error, refresh that job's credentials in the dashboard
+(Sync → Credentials) and rerun; retrying as-is cannot help.
+
 If the *same* failure repeats across multiple days, that's no longer a flake
 retry can paper over — it means the portal actually changed and needs a real
 selector fix upstream (PR to mattebad, same process as the EdFinancial pin).
+
+## Reading a failed run
+
+The "Network diagnostics (on failure)" step probes, at failure time, from both
+sides of the boundary the sync actually crosses:
+
+- **from the host** — the runner's own view, and
+- **from inside the container**, on the compose bridge network, which is where
+  `net::ERR_CONNECTION_REFUSED` is actually raised. A host that reaches the
+  servicer while the container cannot is the orphaned-bridge-network problem
+  described in the next section, not an upstream outage.
+
+It probes this job's servicer (read from `SERVICER_PROVIDER`, or
+`SERVICER_BASE_URL` when that is set, exactly as `config.py` resolves it),
+Monarch, Gmail and the image registry — each on the port the app really uses,
+so Gmail is checked on IMAPS 993 rather than 443. Only hostnames and IPs are
+printed, never `.env` contents, and the step always exits 0 so it cannot mask
+the failure it is describing.
 
 ## Adding a new sync job (new matrix entry, or a new person)
 
