@@ -30,7 +30,7 @@ on:
     # Second pass ~8h later. On 2026-09-07 both servicers were refused at the
     # TCP layer (net::ERR_CONNECTION_REFUSED to nelnet/edfinancial.studentaid.gov,
     # adjacent IPs in one Akamai /24) and the whole day was lost. The in-job retry
-    # below tops out at ~6min of waiting -- far too short to outlast an egress
+    # below tops out at ~20min of waiting -- too short to outlast a real egress
     # block, which is this pass's job. It stands down when the day already
     # succeeded, so a good day costs nothing.
     - cron: "0 22 * * *"
@@ -154,28 +154,57 @@ jobs:
           # had already refused outright.
           fatal='Invalid email and password combination|LoginFailedException|rejected your User ID / Password|credentials are invalid/incorrect|account may be locked'
 
-          attempts=3
-          for i in $(seq 1 "$attempts"); do
+          # Refused before the landing page even loaded. Counted over 2026-09-01..10-06,
+          # 49 of 129 attempts died this way (38%), each in 3-20s and before any login
+          # form was reached -- and the attempt after a refusal was refused at that same
+          # rate (16 of 38), whether it came 60s or 300s later. So this is a coin flip
+          # per attempt, not an outage to wait out, and three flips lose about one job
+          # in 18: both jobs on 2026-09-21, EdFinancial on 2026-10-06. It gets its own,
+          # larger budget because trying again is nearly free (no servicer login happens)
+          # and is the only thing shown to work. Matched on the site root on purpose: a
+          # refusal deeper in means a login already happened, and repeating those is not
+          # free (see the guard step), so they stay on the small budget.
+          refused='Page\.goto: net::ERR_[A-Z_]+ at https?://[^/[:space:]]+/?[[:space:]]*$'
+
+          attempts=3          # everything else: render hiccups, slow pages
+          refused_attempts=8  # 0.38^8 is about 1 in 2,300
+          n=0
+          n_refused=0
+          n_other=0
+          while :; do
+            n=$(( n + 1 ))
             if sudo python3 "$MS/run-with-secrets.py" "$SAFE" -- \
                  docker compose run --rm studentaid-monarch-sync 2>&1 | tee "$out"; then
               exit 0
             fi
 
             if grep -qE "$fatal" "$out"; then
-              echo "::error::$SAFE: a login was rejected outright, so this is not a flake -- stopping after attempt $i rather than risking a lockout. Refresh this job's credentials in the dashboard (Sync -> Credentials), then rerun."
+              echo "::error::$SAFE: a login was rejected outright, so this is not a flake -- stopping after attempt $n rather than risking a lockout. Refresh this job's credentials in the dashboard (Sync -> Credentials), then rerun."
               exit 1
             fi
 
-            if [ "$i" -lt "$attempts" ]; then
-              # 60s clears a render hiccup; 300s can also outlast a brief egress blip.
-              # Anything longer is the evening pass's job, not this loop's.
-              delay=$(( i == 1 ? 60 : 300 ))
-              echo "::warning::Sync attempt $i/$attempts failed (possible transient portal flake); retrying in ${delay}s..."
-              sleep "$delay"
+            if grep -qE "$refused" "$out"; then
+              n_refused=$(( n_refused + 1 ))
+              if [ "$n_refused" -ge "$refused_attempts" ]; then
+                echo "::error::$SAFE: the servicer refused the connection on $n_refused of $n attempts. That is past bad luck -- read the diagnostics step below."
+                exit 1
+              fi
+              # Short and widening: the data says the wait barely matters, but if this
+              # ever is a real egress blip, ~20min of spread is there to outlast it.
+              delay=$(( n_refused <= 4 ? 30 * (1 << (n_refused - 1)) : 300 ))
+              echo "::warning::Sync attempt $n: connection refused before the portal loaded ($n_refused/$refused_attempts); retrying in ${delay}s..."
+            else
+              n_other=$(( n_other + 1 ))
+              if [ "$n_other" -ge "$attempts" ]; then
+                echo "::error::Sync failed after $n attempts ($n_other not explained by a refused connection)."
+                exit 1
+              fi
+              # 60s clears a render hiccup; 300s gives a slow portal time to recover.
+              delay=$(( n_other == 1 ? 60 : 300 ))
+              echo "::warning::Sync attempt $n failed ($n_other/$attempts, possible transient portal flake); retrying in ${delay}s..."
             fi
+            sleep "$delay"
           done
-          echo "::error::Sync failed after $attempts attempts."
-          exit 1
 
       - name: Record success
         if: success() && steps.guard.outputs.skip != 'true'
