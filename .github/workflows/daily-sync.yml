@@ -273,6 +273,74 @@ jobs:
                       s.close()
           ' $targets || echo "   (in-container probe did not run)"
 
+          # Both probes above open a bare IPv4 socket, and twice now that has not been
+          # what failed: on 2026-09-21 and 2026-10-06 Chromium was refused on every
+          # attempt (ERR_CONNECTION_REFUSED / ERR_ADDRESS_UNREACHABLE, 6 and 12 times
+          # running) and one to three seconds later every address above answered, from
+          # this same network. So the browser was connecting somewhere these probes do
+          # not look -- another address for the same name, IPv6, a proxy. Ask the browser
+          # itself: load the servicer's landing page (no login, no secrets) with
+          # Chromium's net-log on, then print each address it tried and the OS error it
+          # got back. Same rule as above: no single quotes inside the python.
+          if [ -n "$servicer" ]; then
+            echo "== what the browser itself sees (Chromium, inside the container) =="
+            timeout 120 sudo docker compose run --rm --no-deps -T \
+              --entrypoint python3 studentaid-monarch-sync -c '
+          import json, os, sys, tempfile
+          from playwright.sync_api import sync_playwright
+          url = sys.argv[1]
+          log = os.path.join(tempfile.mkdtemp(), "netlog.json")
+          ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+          with sync_playwright() as p:
+              browser = p.chromium.launch(args=["--log-net-log=" + log])
+              try:
+                  page = browser.new_context(user_agent=ua).new_page()
+                  resp = page.goto(url, wait_until="commit", timeout=30000)
+                  status = resp.status if resp else None
+                  addr = (resp.server_addr() if resp else None) or {}
+                  ip = addr.get("ipAddress")
+                  print(f"   {url}  loaded: HTTP {status} from {ip}")
+              except Exception as e:
+                  reason = str(e).splitlines()[0]
+                  print(f"   {url}  FAILED: {reason}")
+              finally:
+                  browser.close()
+          try:
+              raw = open(log).read()
+              try:
+                  data = json.loads(raw)
+              except ValueError:
+                  # Chromium leaves the log unterminated if it did not shut down cleanly.
+                  data = json.loads(raw.rstrip().rstrip(",") + "]}")
+              names = {v: k for k, v in data["constants"]["logEventTypes"].items()}
+              tried = {}
+              proxies = set()
+              for ev in data["events"]:
+                  kind = names.get(ev.get("type"))
+                  params = ev.get("params") or {}
+                  sid = ev.get("source", {}).get("id")
+                  if kind == "PROXY_RESOLUTION_SERVICE_RESOLVED_PROXY_LIST":
+                      proxy = params.get("proxy_info")
+                      if proxy not in proxies:
+                          proxies.add(proxy)
+                          print(f"   proxy: {proxy}")
+                  elif kind == "TCP_CONNECT" and "address_list" in params:
+                      resolved = ", ".join(params["address_list"])
+                      print(f"   name resolved to: {resolved}")
+                  elif kind == "TCP_CONNECT_ATTEMPT" and "address" in params:
+                      tried[sid] = params["address"]
+                  elif kind == "TCP_CONNECT_ATTEMPT" and sid in tried:
+                      errno = params.get("os_error")
+                      outcome = "connected" if not errno else f"{os.strerror(errno)} (errno {errno})"
+                      target = tried.pop(sid)
+                      print(f"   tried {target}  {outcome}")
+              for target in tried.values():
+                  print(f"   tried {target}  no result logged")
+          except Exception as e:
+              print(f"   (could not read the browser connection log: {e!r})")
+          ' "$url" || echo "   (browser probe did not run)"
+          fi
+
           # A diagnostic must never mask the failure it describes.
           exit 0
 
