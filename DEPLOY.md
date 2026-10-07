@@ -68,6 +68,22 @@ sides of the boundary the sync actually crosses:
   servicer while the container cannot is the orphaned-bridge-network problem
   described in the next section, not an upstream outage.
 
+Those two are bare IPv4 socket checks, and they can both say "reachable" while
+the browser is still being refused — that is what happened on 2026-09-21 and
+2026-10-06. So a third section, **what the browser itself sees**, loads the
+servicer's landing page in Chromium from inside the container (no login, no
+secrets) and prints what the name resolved to, each address Chromium tried,
+and the OS error it got back. Read it like this:
+
+- `0.0.0.0` or `::` in "name resolved to" — a DNS filter on our network is
+  sinkholing the servicer's name.
+- a `proxy:` line that is not `DIRECT` — the container is being sent through a
+  proxy.
+- a real servicer address with `Connection refused` / `No route to host` —
+  something between the box and the servicer is rejecting that address; check
+  the firewall's blocked-flow log for that IP at that timestamp.
+- the page loads — whatever refused the sync had already cleared seconds later.
+
 It probes this job's servicer (read from `SERVICER_PROVIDER`, or
 `SERVICER_BASE_URL` when that is set, exactly as `config.py` resolves it),
 Monarch, Gmail and the image registry — each on the port the app really uses,
