@@ -36,13 +36,40 @@ it in production while the PR is in review, and switch the `ref:` back to
 
 ## Transient portal flakes: retried at the deploy layer, not in `src/`
 
-The "Run sync" step retries the whole `docker compose run` up to 3 times,
-waiting 60s and then 300s. This exists because the portal login occasionally
-hits a one-off render hiccup — e.g. 2026-07-15's Nelnet run failed with
+The "Run sync" step retries the whole `docker compose run`, with two separate
+budgets depending on how the attempt died.
+
+**Anything that got as far as the portal: up to 3 attempts**, waiting 60s and
+then 300s. This exists because the portal login occasionally hits a one-off
+render hiccup — e.g. 2026-07-15's Nelnet run failed with
 `Could not find clickable element for any of: ('Sign in', ...)`, and a plain
 manual rerun of the exact same code succeeded immediately. That's a signature
 of a transient flake, not a broken selector — worth a workflow-level retry,
 not worth patching `src/` (see above: never diverge from upstream).
+
+**Refused before the landing page loaded: up to 8 attempts**, waiting 30s,
+60s, 120s, 240s, then 300s each (about 22 minutes at worst). This is
+`Page.goto: net::ERR_CONNECTION_REFUSED` / `ERR_ADDRESS_UNREACHABLE` at the
+servicer's root URL, and it is not rare: across every run from 2026-09-01 to
+2026-10-06 it killed 49 of 129 attempts (38%), both servicers alike. Two things
+about it shaped the budget:
+
+- It is a coin flip per attempt, not an outage. The attempt right after a
+  refusal was refused 16 times out of 38 — the same rate as any other attempt,
+  and no better after a 300s wait than after 60s. With three flips a job loses
+  about 1 time in 18, which is what 2026-09-21 (both jobs) and 2026-10-06
+  (EdFinancial) were. With eight it is about 1 in 2,300.
+- A refused attempt is nearly free. It is over in 3–20 seconds and never
+  reaches a login form, so repeating it cannot move a servicer account toward
+  a lockout. (It does repeat the Monarch preflight, which reuses the saved
+  session.) A refusal on any deeper URL means a login already happened, so
+  those are deliberately left on the 3-attempt budget.
+
+This is a workaround for the symptom, not a cure. *Why* Chromium gets refused
+four times in ten while a plain socket to the same address connects seconds
+later is still not known — see "Reading a failed run" below. If the rate ever
+climbs, eight attempts will start losing too, and the answer then is to find
+the cause rather than raise the number again.
 
 **A rejected login is not retried at all.** If the output names one — Monarch's
 `Invalid email and password combination`, the portal's `rejected your User ID /
