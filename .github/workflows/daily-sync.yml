@@ -181,6 +181,24 @@ jobs:
         if: success() && steps.guard.outputs.skip != 'true'
         run: date -u +%s > "$MS/.last-sync-success-$SAFE"
 
+      # Monarch carries a missed day's balance forward, so an outage reads as a
+      # flat line and then a jump. This rebuilds those days from the real
+      # balances on either side (deploy/backfill_balances.py) and is a no-op on
+      # a normal day. The script lives on this fork's main, not the deployed ref
+      # (which tracks upstream), so it is read from there. The image has no tz
+      # database, hence the host's, read-only.
+      - name: Backfill daily balances for days the sync missed
+        if: success() && steps.guard.outputs.skip != 'true'
+        run: |
+          cd "$DIR"
+          script="$RUNNER_TEMP/backfill_balances.py"
+          git show fork/main:deploy/backfill_balances.py > "$script"
+          sudo python3 "$MS/run-with-secrets.py" "$SAFE" -- \
+            docker compose run --rm --no-deps -T \
+              -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro \
+              -v "$script:/app/backfill_balances.py:ro" \
+              --entrypoint python3 studentaid-monarch-sync /app/backfill_balances.py
+
       # A network failure logs only "connection refused" -- not which address, and not
       # whether something on our own network refused it. That gap turned 2026-09-07 into
       # a manual firewall hunt. The probe added to close it never actually closed it:
